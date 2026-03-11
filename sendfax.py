@@ -98,12 +98,15 @@ def cmd_providers(args):
         remaining = p.remaining_today() if p.is_available() else "-"
         print(f"  {p.name:<14} {avail:<20} {limit:<12} remaining: {remaining}")
     print(f"\n  Configure providers in .env file.\n")
-    print("  FREE local methods:")
-    print("    sip_t38    — Asterisk + SIP/T.38 (apt install asterisk)")
-    print("    email_fax  — RFC 3965 via your own SMTP (Gmail etc)")
-    print("    usb_modem  — USB fax modem + efax (apt install efax)")
-    print("  Fallback:")
-    print("    faxzero    — 5 free/day via FaxZero API\n")
+    print("  FREE — no phone line, no hardware, no API:")
+    print("    enum_sip      — ENUM DNS discovery → direct SIP/T.38 (RFC 6116)")
+    print("    virtual_modem — Software modem via t38modem (no hardware)")
+    print("    sip_t38       — Asterisk + SIP/T.38 (apt install asterisk)")
+    print("    email_fax     — RFC 3965 via your own SMTP (Gmail etc)")
+    print("  FREE — needs hardware:")
+    print("    usb_modem     — USB fax modem + efax (apt install efax)")
+    print("  Fallback (external):")
+    print("    faxzero       — 5 free/day via FaxZero API\n")
 
 
 def cmd_contacts(args):

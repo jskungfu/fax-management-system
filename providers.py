@@ -1,13 +1,15 @@
 """
 Fax delivery providers — pluggable backends for sending faxes.
 
-FREE local methods (no external API):
-  1. SIPFaxProvider   — T.38 fax over SIP via local Asterisk (apt install asterisk)
-  2. EmailFaxProvider — RFC 3965 Internet Fax via your own SMTP (Gmail etc.)
-  3. ModemFaxProvider — USB fax modem via efax command (apt install efax)
+FREE local methods (no external API, no phone line, no hardware):
+  0. ENUMFaxProvider  — DNS-based route discovery (RFC 6116) + direct SIP/T.38
+  1. VirtualModemFaxProvider — Software modem via t38modem (no hardware needed)
+  2. SIPFaxProvider   — T.38 fax over SIP via local Asterisk
+  3. EmailFaxProvider — RFC 3965 Internet Fax via your own SMTP (Gmail etc.)
+  4. ModemFaxProvider — USB fax modem via efax command
 
 External fallback:
-  4. FaxZeroProvider  — 5 free faxes/day via FaxZero API
+  5. FaxZeroProvider  — 5 free faxes/day via FaxZero API
 """
 
 import os
@@ -24,6 +26,9 @@ from email.mime.text import MIMEText
 from email import encoders
 from pathlib import Path
 from datetime import date
+
+import re
+import struct
 
 import database as db
 import config
@@ -55,6 +60,316 @@ class FaxProvider(ABC):
 
     def record_send(self):
         db.increment_usage(self.name)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 0. ENUM — DNS-based phone number → SIP URI discovery (RFC 6116)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ENUMFaxProvider(FaxProvider):
+    """
+    ENUM (RFC 6116): Use DNS to discover if a phone number has a SIP endpoint.
+
+    How it works:
+    1. Take phone number +1-609-409-5610
+    2. Reverse digits, query DNS: 0.1.6.5.9.0.4.9.0.6.1.e164.arpa
+    3. If NAPTR record exists → get SIP URI (e.g., sip:+16094095610@gateway.com)
+    4. Send T.38 fax directly to that SIP URI over the internet
+
+    This is completely FREE:
+    - DNS query = free
+    - SIP call over internet = free
+    - No PSTN, no phone line, no API, no hardware
+
+    Many VoIP/cloud fax recipients are already on IP — ENUM discovers this
+    automatically. The fax never touches PSTN.
+
+    Multiple ENUM roots are queried:
+    - e164.arpa       (official ITU root)
+    - e164.org        (community/public root)
+    - e164.freedns.xxx (alternative roots, if configured)
+    """
+
+    name = "enum_sip"
+    daily_limit = 0  # unlimited — it's just DNS + SIP
+    requires_config = []
+
+    # ENUM DNS roots to query (most to least authoritative)
+    ENUM_ROOTS = [
+        "e164.arpa",
+        "e164.org",
+    ]
+
+    def is_available(self) -> bool:
+        # ENUM is always available — it just does DNS lookups
+        # But we need Asterisk or t38modem to actually send the T.38 fax
+        return (shutil.which("asterisk") is not None or
+                shutil.which("t38modem") is not None or
+                os.path.exists("/dev/t38modem0"))
+
+    def send(self, tiff_path: str, to_number: str, **kwargs) -> dict:
+        # Step 1: Resolve phone number to SIP URI via ENUM
+        digits = re.sub(r"[^\d]", "", to_number)
+        if not digits:
+            return {"success": False, "provider_fax_id": "",
+                    "message": "Invalid phone number"}
+
+        sip_uri = self._enum_lookup(digits)
+        if not sip_uri:
+            return {"success": False, "provider_fax_id": "",
+                    "message": f"ENUM: No SIP endpoint found for {to_number}. "
+                               "Number is likely on PSTN only (not reachable via internet)."}
+
+        # Step 2: Send T.38 fax to discovered SIP URI
+        try:
+            if shutil.which("asterisk") and config.AMI_SECRET:
+                result = self._send_via_asterisk(tiff_path, sip_uri)
+            else:
+                result = self._send_via_t38modem(tiff_path, sip_uri)
+
+            if result:
+                self.record_send()
+                return {"success": True, "provider_fax_id": f"enum-{sip_uri}",
+                        "message": f"Fax sent via ENUM→SIP to {sip_uri} (FREE, no PSTN!)"}
+            else:
+                return {"success": False, "provider_fax_id": "",
+                        "message": f"ENUM resolved to {sip_uri} but T.38 delivery failed"}
+        except Exception as e:
+            return {"success": False, "provider_fax_id": "", "message": str(e)}
+
+    def _enum_lookup(self, digits: str) -> str | None:
+        """
+        ENUM lookup: convert phone number to DNS NAPTR query.
+
+        +16094095610 → 0.1.6.5.9.0.4.9.0.6.1.e164.arpa
+        Query for NAPTR records, extract SIP URI.
+        """
+        # Build ENUM domain: reverse digits, dot-separated
+        reversed_digits = ".".join(reversed(digits))
+
+        for root in self.ENUM_ROOTS:
+            domain = f"{reversed_digits}.{root}"
+            try:
+                # Use dig for NAPTR lookup (available on most Linux systems)
+                result = subprocess.run(
+                    ["dig", "+short", "NAPTR", domain],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    uri = self._parse_naptr(result.stdout)
+                    if uri:
+                        return uri
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                # dig not available, try Python DNS resolution
+                uri = self._enum_lookup_python(domain)
+                if uri:
+                    return uri
+
+        return None
+
+    def _enum_lookup_python(self, domain: str) -> str | None:
+        """Pure Python ENUM lookup using raw DNS query over UDP."""
+        try:
+            # Build DNS query for NAPTR record (type 35)
+            query = self._build_dns_query(domain, qtype=35)
+
+            # Send to system resolver
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(3)
+
+            # Read resolv.conf for nameserver
+            nameserver = "8.8.8.8"
+            try:
+                with open("/etc/resolv.conf") as f:
+                    for line in f:
+                        if line.strip().startswith("nameserver"):
+                            nameserver = line.split()[1]
+                            break
+            except (FileNotFoundError, IndexError):
+                pass
+
+            sock.sendto(query, (nameserver, 53))
+            data, _ = sock.recvfrom(4096)
+            sock.close()
+
+            return self._parse_dns_naptr_response(data)
+
+        except Exception:
+            return None
+
+    @staticmethod
+    def _build_dns_query(domain: str, qtype: int = 35) -> bytes:
+        """Build a raw DNS query packet for NAPTR (type 35) records."""
+        import random
+        txn_id = random.randint(0, 65535)
+        # Header: ID, flags (standard query), QDCOUNT=1
+        header = struct.pack("!HHHHHH", txn_id, 0x0100, 1, 0, 0, 0)
+
+        # Question section
+        question = b""
+        for label in domain.split("."):
+            question += bytes([len(label)]) + label.encode()
+        question += b"\x00"  # root label
+        question += struct.pack("!HH", qtype, 1)  # NAPTR, IN class
+
+        return header + question
+
+    @staticmethod
+    def _parse_naptr(dig_output: str) -> str | None:
+        """Parse dig NAPTR output for SIP URIs."""
+        for line in dig_output.strip().split("\n"):
+            line = line.strip()
+            # NAPTR records contain regex replacement patterns for E2U+sip
+            if "E2U+sip" in line.lower() or "sip:" in line.lower():
+                # Extract SIP URI from the regex or replacement field
+                sip_match = re.search(r'sip:[^\s"]+', line, re.IGNORECASE)
+                if sip_match:
+                    return sip_match.group(0)
+                # Try to extract from NAPTR regex field like !^.*$!sip:+1234@gw.com!
+                regex_match = re.search(r'!(.*?)!(.*?)!', line)
+                if regex_match:
+                    replacement = regex_match.group(2)
+                    if "sip:" in replacement.lower():
+                        return replacement
+        return None
+
+    @staticmethod
+    def _parse_dns_naptr_response(data: bytes) -> str | None:
+        """Parse raw DNS response for NAPTR records containing SIP URIs."""
+        try:
+            text = data.decode("ascii", errors="replace")
+            sip_match = re.search(r'sip:[^\s\x00]+', text, re.IGNORECASE)
+            if sip_match:
+                return sip_match.group(0)
+        except Exception:
+            pass
+        return None
+
+    def _send_via_asterisk(self, tiff_path: str, sip_uri: str) -> bool:
+        """Send T.38 fax to SIP URI via Asterisk AMI."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(10)
+        s.connect((config.AMI_HOST, config.AMI_PORT))
+        s.recv(1024)  # banner
+
+        # Login
+        msg = f"Action: Login\r\nUsername: {config.AMI_USER}\r\nSecret: {config.AMI_SECRET}\r\n\r\n"
+        s.sendall(msg.encode())
+        if "Success" not in s.recv(4096).decode(errors="replace"):
+            s.close()
+            return False
+
+        # Originate call to SIP URI with SendFAX
+        msg = (f"Action: Originate\r\nChannel: SIP/{sip_uri}\r\n"
+               f"Application: SendFAX\r\nData: {tiff_path},d\r\n"
+               f"Timeout: 60000\r\n\r\n")
+        s.sendall(msg.encode())
+        resp = s.recv(4096).decode(errors="replace")
+
+        s.sendall(b"Action: Logoff\r\n\r\n")
+        s.close()
+        return "Success" in resp or "Follows" in resp
+
+    @staticmethod
+    def _send_via_t38modem(tiff_path: str, sip_uri: str) -> bool:
+        """Send T.38 fax via t38modem virtual modem device."""
+        modem_dev = "/dev/t38modem0"
+        if not os.path.exists(modem_dev):
+            return False
+        try:
+            result = subprocess.run(
+                ["efax", "-d", modem_dev, "-t", sip_uri, tiff_path],
+                capture_output=True, text=True, timeout=300
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 0b. VIRTUAL MODEM — Software fax modem via t38modem (no hardware)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class VirtualModemFaxProvider(FaxProvider):
+    """
+    t38modem: creates a virtual fax modem in software. No USB modem needed.
+
+    How it works:
+    - t38modem creates a pseudo-TTY device (e.g., /dev/t38modem0)
+    - This device behaves exactly like a hardware fax modem
+    - efax/HylaFAX talks to it as if it were real hardware
+    - t38modem converts modem commands to SIP/T.38 packets
+    - Packets go over the internet to the recipient
+
+    Architecture:
+      Document → TIFF → efax → /dev/t38modem0 → SIP/T.38 → Internet → Recipient
+
+    No phone line. No hardware. No API. Pure software.
+
+    Setup:
+      # Install from OPAL project
+      sudo apt install opal-utils t38modem
+      # Or build from source: https://github.com/T38Modem/t38modem
+      # Start: t38modem --ptty /dev/t38modem0 --sip-listen udp:5060
+    """
+
+    name = "virtual_modem"
+    daily_limit = 0  # unlimited
+    requires_config = []
+
+    def is_available(self) -> bool:
+        # Check if t38modem is running (creates /dev/t38modem0)
+        if os.path.exists("/dev/t38modem0"):
+            return True
+        # Check if t38modem binary exists
+        return shutil.which("t38modem") is not None
+
+    def send(self, tiff_path: str, to_number: str, **kwargs) -> dict:
+        modem_dev = "/dev/t38modem0"
+
+        # Auto-start t38modem if binary exists but device doesn't
+        if not os.path.exists(modem_dev) and shutil.which("t38modem"):
+            try:
+                subprocess.Popen(
+                    ["t38modem", "--ptty", modem_dev, "--sip-listen", "udp$*:5060"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                import time
+                time.sleep(2)  # wait for device to appear
+            except Exception as e:
+                return {"success": False, "provider_fax_id": "",
+                        "message": f"Failed to start t38modem: {e}"}
+
+        if not os.path.exists(modem_dev):
+            return {"success": False, "provider_fax_id": "",
+                    "message": "Virtual modem device not found. Install: sudo apt install t38modem"}
+
+        try:
+            number = re.sub(r"[^\d+]", "", to_number)
+            result = subprocess.run(
+                ["efax", "-d", modem_dev, "-t", number, tiff_path],
+                capture_output=True, text=True, timeout=300
+            )
+
+            if result.returncode == 0:
+                self.record_send()
+                return {
+                    "success": True,
+                    "provider_fax_id": f"vmodem-{number}",
+                    "message": "Fax sent via virtual modem (t38modem → SIP/T.38, no hardware!)"
+                }
+            else:
+                return {
+                    "success": False,
+                    "provider_fax_id": "",
+                    "message": f"Virtual modem error: {result.stderr or result.stdout}"
+                }
+
+        except subprocess.TimeoutExpired:
+            return {"success": False, "provider_fax_id": "",
+                    "message": "Fax transmission timed out (5 min)"}
+        except Exception as e:
+            return {"success": False, "provider_fax_id": "", "message": str(e)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -367,10 +682,12 @@ class FaxZeroProvider(FaxProvider):
 # ══════════════════════════════════════════════════════════════════════════════
 
 ALL_PROVIDERS = [
-    SIPFaxProvider(),
-    EmailFaxProvider(),
-    ModemFaxProvider(),
-    FaxZeroProvider(),
+    ENUMFaxProvider(),        # FREE: DNS route discovery → direct SIP (no PSTN!)
+    VirtualModemFaxProvider(),  # FREE: software modem, no hardware
+    SIPFaxProvider(),         # FREE: Asterisk + SIP/T.38
+    EmailFaxProvider(),       # FREE: RFC 3965 via your SMTP
+    ModemFaxProvider(),       # FREE: USB modem + efax (needs hardware)
+    FaxZeroProvider(),        # FALLBACK: 5 free/day
 ]
 
 
@@ -390,27 +707,38 @@ def get_provider(name: str) -> FaxProvider | None:
 def best_provider(to_address: str = "") -> FaxProvider | None:
     """Auto-select the best available provider.
 
-    Priority:
-    1. SIP/T.38 (if Asterisk is running)
-    2. Email (if recipient has email and SMTP is configured)
-    3. USB Modem (if modem connected)
-    4. FaxZero (fallback, if API key set and daily limit not hit)
+    Priority (most free/local first):
+    0. ENUM → SIP (DNS discovery, completely free, no PSTN!)
+    1. Virtual Modem (t38modem, no hardware)
+    2. SIP/T.38 via Asterisk
+    3. Email (if recipient has email)
+    4. USB Modem (if hardware connected)
+    5. FaxZero (fallback, 5 free/day)
     """
     available = get_available_providers()
+    avail_names = {p.name for p in available}
 
-    for p in available:
-        if p.name == "sip_t38":
-            return p
+    # ENUM first — tries DNS to bypass PSTN entirely
+    if "enum_sip" in avail_names:
+        return get_provider("enum_sip")
 
-    if "@" in to_address:
-        for p in available:
-            if p.name == "email_fax":
-                return p
+    # Virtual modem — software-only, no hardware
+    if "virtual_modem" in avail_names:
+        return get_provider("virtual_modem")
 
-    for p in available:
-        if p.name == "usb_modem":
-            return p
+    # Asterisk SIP/T.38
+    if "sip_t38" in avail_names:
+        return get_provider("sip_t38")
 
+    # Email fax — only if recipient has email address
+    if "@" in to_address and "email_fax" in avail_names:
+        return get_provider("email_fax")
+
+    # USB modem
+    if "usb_modem" in avail_names:
+        return get_provider("usb_modem")
+
+    # FaxZero fallback
     for p in available:
         if p.name == "faxzero" and p.remaining_today() > 0:
             return p
