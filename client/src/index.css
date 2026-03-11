@@ -124,6 +124,9 @@ label {
 
 .badge.queued { background: var(--gray-200); color: var(--gray-700); }
 .badge.sending { background: #dbeafe; color: #1e40af; }
+.badge.sent { background: #e0e7ff; color: #3730a3; }
 .badge.delivered { background: #dcfce7; color: #166534; }
 .badge.failed { background: #fee2e2; color: #991b1b; }
+.badge.busy { background: #fef3c7; color: #92400e; }
+.badge.no_answer { background: #fef3c7; color: #92400e; }
 .badge.received { background: #f0fdf4; color: #15803d; }

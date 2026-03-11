@@ -3,11 +3,15 @@ const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { sendFax } = require('../services/faxService');
+const { sendFax, isRetryable, QUALITY_SETTINGS } = require('../services/faxService');
+const { getNextRetryTime } = require('../services/retryService');
+const { getUsageToday, incrementUsage } = require('../services/usageTracker');
+const { generateReceipt, generateReceiptText } = require('../services/receiptService');
+const { validateFaxNumber } = require('../middleware/security');
 
 const UPLOADS_DIR = path.join(__dirname, '..', '..', '..', 'uploads');
 
-function createRouter(db) {
+function createRouter(db, auditLog) {
   const router = express.Router();
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
@@ -23,7 +27,10 @@ function createRouter(db) {
     fileFilter: (_req, file, cb) => {
       const allowed = ['.pdf', '.doc', '.docx', '.txt', '.png', '.jpg', '.jpeg', '.tif', '.tiff'];
       const ext = path.extname(file.originalname).toLowerCase();
-      cb(null, allowed.includes(ext));
+      if (!allowed.includes(ext)) {
+        return cb(new Error(`File type ${ext} not allowed. Accepted: ${allowed.join(', ')}`));
+      }
+      cb(null, true);
     },
   });
 
@@ -43,6 +50,7 @@ function createRouter(db) {
     }
     sql += ' ORDER BY created_at DESC';
 
+    auditLog('list_faxes', 'fax', null, { status, direction }, req);
     res.json(db.prepare(sql).all(...params));
   });
 
@@ -50,20 +58,68 @@ function createRouter(db) {
   router.get('/:id', (req, res) => {
     const fax = db.prepare('SELECT * FROM faxes WHERE id = ?').get(req.params.id);
     if (!fax) return res.status(404).json({ error: 'Fax not found' });
+    auditLog('view_fax', 'fax', fax.id, null, req);
     res.json(fax);
+  });
+
+  // Get transmission receipt
+  router.get('/:id/receipt', (req, res) => {
+    const fax = db.prepare('SELECT * FROM faxes WHERE id = ?').get(req.params.id);
+    if (!fax) return res.status(404).json({ error: 'Fax not found' });
+
+    const format = req.query.format || 'json';
+    auditLog('view_receipt', 'fax', fax.id, { format }, req);
+
+    if (format === 'text') {
+      res.type('text/plain').send(generateReceiptText(fax));
+    } else {
+      res.json(generateReceipt(fax));
+    }
+  });
+
+  // Get quality settings info
+  router.get('/settings/quality', (_req, res) => {
+    res.json(QUALITY_SETTINGS);
   });
 
   // Send a fax
   router.post('/send', upload.single('document'), async (req, res) => {
-    const { to_number, to_name, from_number, from_name, from_email, notes } = req.body;
+    const { to_number, to_name, from_number, from_name, from_email, notes, quality, page_count } = req.body;
 
     if (!to_number) {
       return res.status(400).json({ error: 'to_number is required' });
     }
 
+    if (!validateFaxNumber(to_number)) {
+      return res.status(400).json({ error: 'Invalid fax number format. Use digits with optional dashes/spaces (7-15 digits).' });
+    }
+
     const apiKey = process.env.FAXZERO_API_KEY;
     if (!apiKey) {
       return res.status(500).json({ error: 'FAXZERO_API_KEY is not configured. See .env.example' });
+    }
+
+    // Check free tier usage
+    const usage = getUsageToday(db);
+    if (!usage.canSend) {
+      auditLog('fax_blocked_limit', 'fax', null, { usage }, req);
+      return res.status(429).json({
+        error: `Daily free tier limit reached (${usage.dailyLimit} faxes/day). Try again tomorrow.`,
+        usage,
+      });
+    }
+
+    const pages = parseInt(page_count) || 0;
+    if (pages > usage.pageLimit) {
+      return res.status(400).json({
+        error: `Free tier allows max ${usage.pageLimit} pages per fax. You specified ${pages}.`,
+      });
+    }
+
+    const faxQuality = quality || 'standard';
+    const qualityConfig = QUALITY_SETTINGS[faxQuality];
+    if (!qualityConfig) {
+      return res.status(400).json({ error: `Invalid quality. Use: ${Object.keys(QUALITY_SETTINGS).join(', ')}` });
     }
 
     const id = uuidv4();
@@ -74,11 +130,15 @@ function createRouter(db) {
 
     // Insert as queued
     db.prepare(`
-      INSERT INTO faxes (id, direction, status, from_name, from_number, from_email, to_name, to_number, file_path, notes)
-      VALUES (?, 'outbound', 'queued', ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, senderName, senderNumber, senderEmail, to_name || '', to_number, filePath, notes || null);
+      INSERT INTO faxes (id, direction, status, from_name, from_number, from_email,
+        to_name, to_number, page_count, file_path, notes, quality, resolution)
+      VALUES (?, 'outbound', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, senderName, senderNumber, senderEmail, to_name || '',
+      to_number, pages, filePath, notes || null, faxQuality, qualityConfig.resolution);
 
-    // Attempt to send via FaxZero
+    auditLog('fax_send_initiated', 'fax', id, { to_number, quality: faxQuality }, req);
+
+    // Attempt to send
     try {
       db.prepare("UPDATE faxes SET status = 'sending', updated_at = datetime('now') WHERE id = ?").run(id);
 
@@ -91,25 +151,50 @@ function createRouter(db) {
         toNumber: to_number,
         coverMessage: notes || '',
         filePath: filePath ? path.join(UPLOADS_DIR, filePath) : null,
+        quality: faxQuality,
       });
 
       db.prepare(`
-        UPDATE faxes SET status = 'delivered', api_response = ?, updated_at = datetime('now') WHERE id = ?
-      `).run(JSON.stringify(result), id);
+        UPDATE faxes SET status = 'sent', api_response = ?, api_fax_id = ?,
+          updated_at = datetime('now')
+        WHERE id = ?
+      `).run(JSON.stringify(result), result.fax_id || null, id);
+
+      incrementUsage(db, pages);
+      auditLog('fax_sent', 'fax', id, { api_fax_id: result.fax_id }, req);
     } catch (err) {
-      db.prepare(`
-        UPDATE faxes SET status = 'failed', error_message = ?, updated_at = datetime('now') WHERE id = ?
-      `).run(err.message, id);
+      const errorCode = err.faxErrorCode || 'other';
+      const canRetry = isRetryable(errorCode);
+
+      if (canRetry) {
+        const nextRetry = getNextRetryTime(0);
+        db.prepare(`
+          UPDATE faxes SET status = ?, error_message = ?, next_retry_at = ?,
+            updated_at = datetime('now')
+          WHERE id = ?
+        `).run(errorCode === 'busy' ? 'busy' : (errorCode === 'no_answer' ? 'no_answer' : 'failed'),
+          err.message, nextRetry, id);
+
+        auditLog('fax_retry_scheduled', 'fax', id, { errorCode, nextRetry }, req);
+      } else {
+        db.prepare(`
+          UPDATE faxes SET status = 'failed', error_message = ?,
+            updated_at = datetime('now')
+          WHERE id = ?
+        `).run(`${err.message} (Not retryable: ${errorCode})`, id);
+
+        auditLog('fax_failed', 'fax', id, { errorCode, message: err.message }, req);
+      }
     }
 
     const fax = db.prepare('SELECT * FROM faxes WHERE id = ?').get(id);
     res.status(201).json(fax);
   });
 
-  // Update fax status
+  // Update fax status (used by webhooks)
   router.patch('/:id/status', (req, res) => {
     const { status } = req.body;
-    const valid = ['queued', 'sending', 'delivered', 'failed', 'received'];
+    const valid = ['queued', 'sending', 'sent', 'delivered', 'failed', 'busy', 'no_answer', 'received'];
     if (!status || !valid.includes(status)) {
       return res.status(400).json({ error: `status must be one of: ${valid.join(', ')}` });
     }
@@ -119,6 +204,16 @@ function createRouter(db) {
     ).run(status, req.params.id);
 
     if (result.changes === 0) return res.status(404).json({ error: 'Fax not found' });
+
+    auditLog('fax_status_updated', 'fax', req.params.id, { status }, req);
+
+    // Generate receipt on delivery
+    if (status === 'delivered') {
+      const fax = db.prepare('SELECT * FROM faxes WHERE id = ?').get(req.params.id);
+      const receipt = JSON.stringify(generateReceipt(fax));
+      db.prepare('UPDATE faxes SET transmission_receipt = ? WHERE id = ?').run(receipt, req.params.id);
+    }
+
     res.json(db.prepare('SELECT * FROM faxes WHERE id = ?').get(req.params.id));
   });
 
@@ -133,6 +228,7 @@ function createRouter(db) {
     }
 
     db.prepare('DELETE FROM faxes WHERE id = ?').run(req.params.id);
+    auditLog('fax_deleted', 'fax', req.params.id, null, req);
     res.json({ message: 'Fax deleted' });
   });
 
