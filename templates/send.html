@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Send Fax{% endblock %}
+{% block content %}
+<h1>Send Fax</h1>
+
+<form method="POST" enctype="multipart/form-data" class="form-card">
+    <div class="form-section">
+        <h3>Recipient</h3>
+        <label>Fax Number or Email *
+            <input type="text" name="to_number" required placeholder="+15551234567 or user@efax.com">
+        </label>
+        <label>Name
+            <input type="text" name="to_name" placeholder="Recipient name">
+        </label>
+        {% if contacts %}
+        <label>Quick Select Contact
+            <select onchange="if(this.value){let c=JSON.parse(this.value);document.querySelector('[name=to_number]').value=c.n;document.querySelector('[name=to_name]').value=c.m}">
+                <option value="">-- select --</option>
+                {% for c in contacts %}
+                <option value='{"n":"{{ c.fax_number }}","m":"{{ c.name }}"}'>{{ c.name }} ({{ c.fax_number }})</option>
+                {% endfor %}
+            </select>
+        </label>
+        {% endif %}
+    </div>
+
+    <div class="form-section">
+        <h3>Sender</h3>
+        <label>Number <input type="text" name="from_number" value="{{ config.FROM_NUMBER }}"></label>
+        <label>Name <input type="text" name="from_name" value="{{ config.FROM_NAME }}"></label>
+        <label>Email <input type="email" name="from_email" value="{{ config.FROM_EMAIL }}"></label>
+    </div>
+
+    <div class="form-section">
+        <h3>Document</h3>
+        <label>File * (PDF, image, or text)
+            <input type="file" name="document" required accept=".pdf,.png,.jpg,.jpeg,.tiff,.tif,.txt,.bmp,.gif">
+        </label>
+        <label>Cover Page Message
+            <textarea name="cover_message" rows="3" placeholder="Optional message for cover page"></textarea>
+        </label>
+    </div>
+
+    <div class="form-section">
+        <h3>Delivery Method</h3>
+        <label>Provider
+            <select name="provider">
+                <option value="">Auto-select best</option>
+                {% for p in providers %}
+                <option value="{{ p.name }}">{{ p.name }} ({{ p.remaining_today() }} remaining)</option>
+                {% endfor %}
+            </select>
+        </label>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Send Fax</button>
+</form>
+{% endblock %}

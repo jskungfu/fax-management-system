@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Contacts{% endblock %}
+{% block content %}
+<h1>Contacts</h1>
+
+<details class="form-card">
+    <summary class="btn btn-primary">Add Contact</summary>
+    <form method="POST" style="margin-top:1rem">
+        <label>Name * <input type="text" name="name" required></label>
+        <label>Fax Number * <input type="text" name="fax_number" required placeholder="+15551234567"></label>
+        <label>Company <input type="text" name="company"></label>
+        <label>Email <input type="email" name="email" placeholder="For email fax delivery"></label>
+        <label>SIP URI <input type="text" name="sip_uri" placeholder="sip:user@domain.com"></label>
+        <button type="submit" class="btn btn-primary">Save</button>
+    </form>
+</details>
+
+{% if contacts %}
+<table>
+    <thead>
+        <tr><th>Name</th><th>Fax Number</th><th>Company</th><th>Email</th><th>SIP</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for c in contacts %}
+        <tr>
+            <td>{{ c.name }}</td>
+            <td>{{ c.fax_number }}</td>
+            <td>{{ c.company }}</td>
+            <td>{{ c.email }}</td>
+            <td>{{ c.sip_uri }}</td>
+            <td>
+                <form method="POST" action="{{ url_for('delete_contact', contact_id=c.id) }}" style="display:inline">
+                    <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Delete?')">Del</button>
+                </form>
+            </td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="empty">No contacts yet.</p>
+{% endif %}
+{% endblock %}

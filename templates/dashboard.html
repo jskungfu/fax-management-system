@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="cards">
+    <div class="card">
+        <div class="card-num">{{ status.stats.total }}</div>
+        <div class="card-label">Total Faxes</div>
+    </div>
+    <div class="card card-green">
+        <div class="card-num">{{ status.stats.sent }}</div>
+        <div class="card-label">Sent</div>
+    </div>
+    <div class="card card-red">
+        <div class="card-num">{{ status.stats.failed }}</div>
+        <div class="card-label">Failed</div>
+    </div>
+    <div class="card card-yellow">
+        <div class="card-num">{{ status.stats.retry }}</div>
+        <div class="card-label">Retry</div>
+    </div>
+</div>
+
+<h2>Providers</h2>
+<table>
+    <thead>
+        <tr><th>Provider</th><th>Status</th><th>Limit</th><th>Remaining</th></tr>
+    </thead>
+    <tbody>
+    {% for p in status.providers %}
+        <tr>
+            <td><strong>{{ p.name }}</strong></td>
+            <td>{% if p.available %}<span class="badge badge-green">READY</span>{% else %}<span class="badge badge-gray">OFF</span>{% endif %}</td>
+            <td>{{ p.daily_limit if p.daily_limit else 'unlimited' }}/day</td>
+            <td>{{ p.remaining_today if p.available else '-' }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+{% if recent %}
+<h2>Recent Faxes</h2>
+<table>
+    <thead>
+        <tr><th>ID</th><th>To</th><th>Status</th><th>Provider</th><th>Date</th></tr>
+    </thead>
+    <tbody>
+    {% for f in recent %}
+        <tr>
+            <td>{{ f.id }}</td>
+            <td>{{ f.to_number }}</td>
+            <td><span class="badge badge-{{ 'green' if f.status in ('sent','delivered') else 'red' if f.status == 'failed' else 'yellow' }}">{{ f.status }}</span></td>
+            <td>{{ f.provider or '-' }}</td>
+            <td>{{ f.created_at[:16] }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}
