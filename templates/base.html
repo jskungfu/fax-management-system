@@ -14,6 +14,7 @@
         <a href="{{ url_for('history') }}" class="{% if request.endpoint == 'history' %}active{% endif %}">History</a>
         <a href="{{ url_for('contacts') }}" class="{% if request.endpoint == 'contacts' %}active{% endif %}">Contacts</a>
         <a href="{{ url_for('audit') }}" class="{% if request.endpoint == 'audit' %}active{% endif %}">Audit Log</a>
+        <a href="{{ url_for('mesh_dashboard') }}" class="{% if request.endpoint == 'mesh_dashboard' %}active{% endif %}">P2P Mesh</a>
     </nav>
     <main>
         {% with messages = get_flashed_messages(with_categories=true) %}

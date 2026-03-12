@@ -37,6 +37,14 @@ MODEM_DEVICE = os.getenv("MODEM_DEVICE", "/dev/ttyUSB0")
 # FaxZero fallback
 FAXZERO_API_KEY = os.getenv("FAXZERO_API_KEY", "")
 
+# P2P Relay Mesh Network
+P2P_RELAY_ENABLED = os.getenv("P2P_RELAY_ENABLED", "false").lower() in ("true", "1", "yes")
+P2P_RELAY_HOST = os.getenv("P2P_RELAY_HOST", "0.0.0.0")
+P2P_RELAY_PORT = int(os.getenv("P2P_RELAY_PORT", "8765"))
+P2P_AREA_CODES = [ac.strip() for ac in os.getenv("P2P_AREA_CODES", "").split(",") if ac.strip()]
+P2P_COUNTRY_CODES = [cc.strip() for cc in os.getenv("P2P_COUNTRY_CODES", "1").split(",") if cc.strip()]
+P2P_BOOTSTRAP_PEERS = [p.strip() for p in os.getenv("P2P_BOOTSTRAP_PEERS", "").split(",") if p.strip()]
+
 # Flask
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 PORT = int(os.getenv("PORT", "5000"))

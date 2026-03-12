@@ -61,9 +61,39 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS p2p_peers (
+            node_id TEXT PRIMARY KEY,
+            host TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            public_key TEXT DEFAULT '',
+            capabilities TEXT DEFAULT '[]',
+            area_codes TEXT DEFAULT '[]',
+            country_codes TEXT DEFAULT '[]',
+            trust_score REAL DEFAULT 0.5,
+            relay_count INTEGER DEFAULT 0,
+            fail_count INTEGER DEFAULT 0,
+            last_seen TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS p2p_relay_jobs (
+            job_id TEXT PRIMARY KEY,
+            source_node TEXT NOT NULL,
+            target_number TEXT NOT NULL,
+            payload_hash TEXT,
+            status TEXT DEFAULT 'pending',
+            hops TEXT DEFAULT '[]',
+            hop_count INTEGER DEFAULT 0,
+            delivery_proof TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_faxes_status ON faxes(status);
         CREATE INDEX IF NOT EXISTS idx_faxes_created ON faxes(created_at);
         CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+        CREATE INDEX IF NOT EXISTS idx_p2p_peers_trust ON p2p_peers(trust_score);
+        CREATE INDEX IF NOT EXISTS idx_p2p_jobs_status ON p2p_relay_jobs(status);
     """)
     db.close()
 

@@ -155,6 +155,27 @@ def api_retry():
     return jsonify({"message": "Retries processed"})
 
 
+@app.route("/api/mesh")
+def api_mesh():
+    """P2P relay mesh network status."""
+    from providers import get_provider
+    p2p = get_provider("p2p_relay")
+    if p2p and hasattr(p2p, "get_mesh_status"):
+        return jsonify(p2p.get_mesh_status())
+    return jsonify({"error": "P2P relay not enabled"}), 404
+
+
+@app.route("/mesh")
+def mesh_dashboard():
+    """P2P mesh network dashboard page."""
+    from providers import get_provider
+    p2p = get_provider("p2p_relay")
+    mesh_status = {}
+    if p2p and p2p.is_available() and hasattr(p2p, "get_mesh_status"):
+        mesh_status = p2p.get_mesh_status()
+    return render_template("mesh.html", mesh=mesh_status)
+
+
 if __name__ == "__main__":
     print(f"\n  Fax Management System")
     print(f"  http://localhost:{config.PORT}\n")

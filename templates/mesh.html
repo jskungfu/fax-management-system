@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}P2P Mesh Network{% endblock %}
+{% block content %}
+<h1>P2P Fax Relay Mesh</h1>
+
+{% if not mesh or mesh.get('error') %}
+<div class="flash info">
+    P2P relay is not enabled. Set <code>P2P_RELAY_ENABLED=true</code> in your .env file to join the mesh.
+</div>
+<div class="card">
+    <h3>What is P2P Fax Relay?</h3>
+    <p>A decentralized mesh network where nodes cooperatively relay faxes to each other.
+    Each node announces its delivery capabilities (modem, SIP trunk, email gateway) and
+    the network automatically routes faxes through peers to reach any destination.</p>
+    <ul>
+        <li><strong>Kademlia DHT</strong> — distributed routing table maps phone prefixes to capable peers</li>
+        <li><strong>mDNS Discovery</strong> — zero-config LAN peer discovery</li>
+        <li><strong>Encrypted Relay</strong> — onion-style layered encryption through relay chain</li>
+        <li><strong>Store-and-Forward</strong> — reliable delivery even when peers go offline</li>
+        <li><strong>Trust Scoring</strong> — EigenTrust-inspired reputation prevents abuse</li>
+        <li><strong>Cooperative Pool</strong> — N users &times; M faxes/day = N&times;M total capacity</li>
+    </ul>
+</div>
+{% else %}
+
+<div class="cards">
+    <div class="card">
+        <div class="card-num">{{ mesh.node_id }}</div>
+        <div class="card-label">Node ID</div>
+    </div>
+    <div class="card card-green">
+        <div class="card-num">{{ mesh.alive_peers }}</div>
+        <div class="card-label">Active Peers</div>
+    </div>
+    <div class="card">
+        <div class="card-num">{{ mesh.routing_prefixes }}</div>
+        <div class="card-label">Routing Prefixes</div>
+    </div>
+    <div class="card card-yellow">
+        <div class="card-num">{{ mesh.stored_jobs }}</div>
+        <div class="card-label">Stored Jobs</div>
+    </div>
+</div>
+
+<div class="cards">
+    <div class="card">
+        <div class="card-num">{{ mesh.active_jobs }}</div>
+        <div class="card-label">Active Relays</div>
+    </div>
+    <div class="card card-green">
+        <div class="card-num">{{ mesh.completed_jobs }}</div>
+        <div class="card-label">Completed</div>
+    </div>
+</div>
+
+<h2>Node Capabilities</h2>
+<p>
+    {% for cap in mesh.capabilities %}
+    <span class="badge badge-green">{{ cap }}</span>
+    {% endfor %}
+    {% if not mesh.capabilities %}
+    <span class="badge badge-gray">relay only</span>
+    {% endif %}
+</p>
+<p>Area codes: <strong>{{ mesh.area_codes | join(', ') or 'any' }}</strong></p>
+
+{% if mesh.peers %}
+<h2>Connected Peers</h2>
+<table>
+    <thead>
+        <tr><th>Node ID</th><th>Address</th><th>Capabilities</th><th>Trust</th><th>Relays</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+    {% for p in mesh.peers %}
+        <tr>
+            <td><code>{{ p.id }}</code></td>
+            <td>{{ p.host }}</td>
+            <td>
+                {% for cap in p.capabilities %}
+                <span class="badge badge-green">{{ cap }}</span>
+                {% endfor %}
+            </td>
+            <td>{{ p.trust }}</td>
+            <td>{{ p.relays }}</td>
+            <td>{% if p.alive %}<span class="badge badge-green">ONLINE</span>{% else %}<span class="badge badge-gray">OFFLINE</span>{% endif %}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+{% if mesh.routes %}
+<h2>Routing Table</h2>
+<table>
+    <thead>
+        <tr><th>Number Prefix</th><th>Available Peers</th><th>Peer IDs</th></tr>
+    </thead>
+    <tbody>
+    {% for prefix, info in mesh.routes.items() %}
+        <tr>
+            <td><code>{{ prefix }}</code></td>
+            <td>{{ info.peer_count }}</td>
+            <td>{% for pid in info.peers %}<code>{{ pid }}</code> {% endfor %}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+{% endif %}
+{% endblock %}

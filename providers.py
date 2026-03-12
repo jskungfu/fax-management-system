@@ -8,8 +8,11 @@ FREE local methods (no external API, no phone line, no hardware):
   3. EmailFaxProvider — RFC 3965 Internet Fax via your own SMTP (Gmail etc.)
   4. ModemFaxProvider — USB fax modem via efax command
 
+P2P mesh relay:
+  5. P2PRelayProvider — Decentralized mesh network relay (Kademlia DHT + mDNS)
+
 External fallback:
-  5. FaxZeroProvider  — 5 free faxes/day via FaxZero API
+  6. FaxZeroProvider  — 5 free faxes/day via FaxZero API
 """
 
 import os
@@ -612,7 +615,122 @@ class ModemFaxProvider(FaxProvider):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4. FAXZERO — Free API fallback (5/day)
+# 4. P2P RELAY — Decentralized mesh network fax delivery
+# ══════════════════════════════════════════════════════════════════════════════
+
+class P2PRelayProvider(FaxProvider):
+    """
+    Peer-to-Peer Fax Relay Mesh Network.
+
+    How it works:
+    - Your node joins a decentralized mesh of other fax nodes
+    - Nodes announce which phone numbers they can deliver to (via modem, SIP, etc.)
+    - When you send a fax, the mesh routes it through peers to a node
+      that can actually deliver it
+    - Uses Kademlia DHT for routing, mDNS for LAN discovery
+    - Encrypted store-and-forward for reliability
+    - Trust/reputation scoring prevents abuse
+
+    Architecture:
+      You → [encrypted relay] → Peer B → [relay] → Peer C (has modem) → PSTN → Fax
+
+    This is completely FREE:
+    - No API keys needed
+    - No phone line needed locally
+    - Leverages the collective fax infrastructure of all mesh participants
+    - N users × M faxes/day each = N×M total capacity for the network
+
+    Setup:
+      # Just enable it — peer discovery is automatic via mDNS on LAN
+      # For WAN: add bootstrap peer addresses in .env
+      P2P_RELAY_ENABLED=true
+      P2P_RELAY_PORT=8765
+      P2P_AREA_CODES=212,718  # area codes you can deliver to (if you have modem/SIP)
+    """
+
+    name = "p2p_relay"
+    daily_limit = 0  # unlimited — depends on mesh capacity
+    requires_config = []
+
+    _node = None  # singleton relay node
+
+    def is_available(self) -> bool:
+        return config.P2P_RELAY_ENABLED
+
+    def _get_node(self):
+        """Get or create the singleton P2P relay node."""
+        if P2PRelayProvider._node is None:
+            from p2p_relay import P2PRelayNode
+            P2PRelayProvider._node = P2PRelayNode(
+                host=config.P2P_RELAY_HOST,
+                port=config.P2P_RELAY_PORT,
+                capabilities=self._detect_capabilities(),
+                area_codes=config.P2P_AREA_CODES,
+                country_codes=config.P2P_COUNTRY_CODES,
+            )
+            # Add bootstrap peers
+            for peer in config.P2P_BOOTSTRAP_PEERS:
+                if ":" in peer:
+                    host, port = peer.rsplit(":", 1)
+                    P2PRelayProvider._node.add_bootstrap_peer(host, int(port))
+            P2PRelayProvider._node.start()
+        return P2PRelayProvider._node
+
+    def _detect_capabilities(self) -> list:
+        """Auto-detect what fax capabilities this node has."""
+        caps = []
+        if shutil.which("asterisk") and config.AMI_SECRET:
+            caps.append("sip")
+        if os.path.exists("/dev/t38modem0") or shutil.which("t38modem"):
+            caps.append("virtual_modem")
+        if shutil.which("efax") and os.path.exists(config.MODEM_DEVICE):
+            caps.append("modem")
+        if config.SMTP_USER and config.SMTP_PASS:
+            caps.append("email")
+        if config.FAXZERO_API_KEY:
+            caps.append("faxzero")
+        return caps
+
+    def send(self, tiff_path: str, to_number: str, **kwargs) -> dict:
+        try:
+            node = self._get_node()
+            result = node.relay_fax(to_number, tiff_path)
+
+            if result["success"]:
+                self.record_send()
+                route = result.get("route", "unknown")
+                msg_parts = [f"Fax relayed via P2P mesh ({route})"]
+                if result.get("relay_peer"):
+                    msg_parts.append(f"via peer {result['relay_peer']}")
+                if result.get("hops"):
+                    msg_parts.append(f"{result['hops']} hops")
+
+                return {
+                    "success": True,
+                    "provider_fax_id": result.get("job_id", ""),
+                    "message": " — ".join(msg_parts),
+                }
+            else:
+                return {
+                    "success": False,
+                    "provider_fax_id": "",
+                    "message": result.get("message", "P2P relay failed"),
+                }
+
+        except Exception as e:
+            return {"success": False, "provider_fax_id": "", "message": str(e)}
+
+    def get_mesh_status(self) -> dict:
+        """Get P2P mesh network status."""
+        try:
+            node = self._get_node()
+            return node.get_mesh_status()
+        except Exception:
+            return {"error": "P2P relay not running"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. FAXZERO — Free API fallback (5/day)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class FaxZeroProvider(FaxProvider):
@@ -687,6 +805,7 @@ ALL_PROVIDERS = [
     SIPFaxProvider(),         # FREE: Asterisk + SIP/T.38
     EmailFaxProvider(),       # FREE: RFC 3965 via your SMTP
     ModemFaxProvider(),       # FREE: USB modem + efax (needs hardware)
+    P2PRelayProvider(),       # FREE: Decentralized mesh relay (no hardware!)
     FaxZeroProvider(),        # FALLBACK: 5 free/day
 ]
 
@@ -737,6 +856,10 @@ def best_provider(to_address: str = "") -> FaxProvider | None:
     # USB modem
     if "usb_modem" in avail_names:
         return get_provider("usb_modem")
+
+    # P2P relay mesh — try the decentralized network
+    if "p2p_relay" in avail_names:
+        return get_provider("p2p_relay")
 
     # FaxZero fallback
     for p in available:

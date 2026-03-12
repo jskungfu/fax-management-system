@@ -139,6 +139,44 @@ def cmd_retry(args):
     print("  Retries processed.\n")
 
 
+def cmd_mesh(args):
+    """Show P2P mesh network status."""
+    from providers import get_provider
+    p2p = get_provider("p2p_relay")
+    if not p2p or not p2p.is_available():
+        print("\n  P2P relay not enabled. Set P2P_RELAY_ENABLED=true in .env\n")
+        return
+
+    mesh = p2p.get_mesh_status()
+    print("\n  ╔══════════════════════════════════════╗")
+    print("  ║     P2P FAX RELAY MESH NETWORK       ║")
+    print("  ╚══════════════════════════════════════╝\n")
+
+    print(f"  Node ID:     {mesh.get('node_id', 'unknown')}")
+    print(f"  Capabilities: {', '.join(mesh.get('capabilities', [])) or 'relay only'}")
+    print(f"  Area codes:  {', '.join(mesh.get('area_codes', [])) or 'any'}")
+    print(f"\n  Peers: {mesh.get('alive_peers', 0)} alive / {mesh.get('total_peers', 0)} total")
+    print(f"  Routes: {mesh.get('routing_prefixes', 0)} phone prefixes")
+    print(f"  Jobs: {mesh.get('active_jobs', 0)} active, {mesh.get('stored_jobs', 0)} stored, "
+          f"{mesh.get('completed_jobs', 0)} completed")
+
+    peers = mesh.get("peers", [])
+    if peers:
+        print(f"\n  {'NODE':<14} {'ADDRESS':<20} {'CAPS':<18} {'TRUST':<7} {'STATUS'}")
+        print(f"  {'─'*14} {'─'*20} {'─'*18} {'─'*7} {'─'*8}")
+        for p in peers:
+            caps = ",".join(p.get("capabilities", []))[:16]
+            status_icon = "●" if p.get("alive") else "○"
+            print(f"  {p['id']:<14} {p['host']:<20} {caps:<18} {p['trust']:<7} {status_icon}")
+
+    routes = mesh.get("routes", {})
+    if routes:
+        print(f"\n  ROUTING TABLE:")
+        for prefix, info in routes.items():
+            print(f"    {prefix:<8} → {info['peer_count']} peers [{', '.join(info.get('peers', []))}]")
+    print()
+
+
 def cmd_dashboard(args):
     """Show system dashboard."""
     status = get_system_status()
@@ -210,6 +248,9 @@ def main():
     # dashboard
     sub.add_parser("dashboard", help="System dashboard")
 
+    # mesh
+    sub.add_parser("mesh", help="P2P mesh network status")
+
     args = parser.parse_args()
 
     commands = {
@@ -221,6 +262,7 @@ def main():
         "contact-add": cmd_contact_add,
         "retry": cmd_retry,
         "dashboard": cmd_dashboard,
+        "mesh": cmd_mesh,
     }
 
     if args.command in commands:
