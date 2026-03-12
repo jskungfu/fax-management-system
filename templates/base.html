@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fax System — {% block title %}Dashboard{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <nav class="sidebar">
+        <div class="logo">FAX</div>
+        <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">Dashboard</a>
+        <a href="{{ url_for('send') }}" class="{% if request.endpoint == 'send' %}active{% endif %}">Send Fax</a>
+        <a href="{{ url_for('history') }}" class="{% if request.endpoint == 'history' %}active{% endif %}">History</a>
+        <a href="{{ url_for('contacts') }}" class="{% if request.endpoint == 'contacts' %}active{% endif %}">Contacts</a>
+        <a href="{{ url_for('audit') }}" class="{% if request.endpoint == 'audit' %}active{% endif %}">Audit Log</a>
+        <a href="{{ url_for('mesh_dashboard') }}" class="{% if request.endpoint == 'mesh_dashboard' %}active{% endif %}">P2P Mesh</a>
+    </nav>
+    <main>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        {% for cat, msg in messages %}
+        <div class="flash {{ cat }}">{{ msg }}</div>
+        {% endfor %}
+        {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>
